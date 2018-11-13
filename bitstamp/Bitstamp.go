@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,6 +24,10 @@ type Bitstamp struct {
 	clientId,
 	accessKey,
 	secretkey string
+	ws                *WsConn
+	createWsLock      sync.Mutex
+	wsTickerHandleMap map[string]func(*Ticker)
+	wsDepthHandleMap  map[string]func(*Depth)
 }
 
 func NewBitstamp(client *http.Client, accessKey, secertkey, clientId string) *Bitstamp {
@@ -98,21 +103,21 @@ func (bitstamp *Bitstamp) GetAccount() (*Account, error) {
 		LoanAmount:   0,
 	}
 	acc.SubAccounts[BCH] = SubAccount{
-		Currency:BCH,
-		Amount: ToFloat64(respmap["bch_available"]),
-		ForzenAmount:ToFloat64(respmap["bch_reserved"]),
-		LoanAmount:0}
+		Currency:     BCH,
+		Amount:       ToFloat64(respmap["bch_available"]),
+		ForzenAmount: ToFloat64(respmap["bch_reserved"]),
+		LoanAmount:   0}
 	return &acc, nil
 }
 
-func (bitstamp *Bitstamp) placeOrder(side string, pair CurrencyPair, amount, price string) (*Order, error) {
+func (bitstamp *Bitstamp) placeOrder(side string, pair CurrencyPair, amount, price, urlStr string) (*Order, error) {
 	params := url.Values{}
 	params.Set("amount", amount)
-	params.Set("price", price)
+	if price != "" {
+		params.Set("price", price)
+	}
 	bitstamp.buildPostForm(&params)
 
-	urlStr := fmt.Sprintf("%sv2/%s/%s/", BASE_URL, side, strings.ToLower(pair.ToSymbol("")))
-	println(urlStr)
 	resp, err := HttpPostForm(bitstamp.client, urlStr, params)
 	if err != nil {
 		return nil, err
@@ -135,10 +140,16 @@ func (bitstamp *Bitstamp) placeOrder(side string, pair CurrencyPair, amount, pri
 		orderSide = SELL
 	}
 
+	orderprice, isok := respmap["price"].(string)
+	if !isok {
+		return nil, errors.New(string(resp))
+	}
+
 	return &Order{
 		Currency:   pair,
 		OrderID:    ToInt(orderId),
-		Price:      ToFloat64(price),
+		OrderID2:   orderId,
+		Price:      ToFloat64(orderprice),
 		Amount:     ToFloat64(amount),
 		DealAmount: 0,
 		AvgPrice:   0,
@@ -147,20 +158,32 @@ func (bitstamp *Bitstamp) placeOrder(side string, pair CurrencyPair, amount, pri
 		OrderTime:  1}, nil
 }
 
+func (bitstamp *Bitstamp) placeLimitOrder(side string, pair CurrencyPair, amount, price string) (*Order, error) {
+	urlStr := fmt.Sprintf("%sv2/%s/%s/", BASE_URL, side, strings.ToLower(pair.ToSymbol("")))
+	//println(urlStr)
+	return bitstamp.placeOrder(side, pair, amount, price, urlStr)
+}
+
+func (bitstamp *Bitstamp) placeMarketOrder(side string, pair CurrencyPair, amount string) (*Order, error) {
+	urlStr := fmt.Sprintf("%sv2/%s/market/%s/", BASE_URL, side, strings.ToLower(pair.ToSymbol("")))
+	//println(urlStr)
+	return bitstamp.placeOrder(side, pair, amount, "", urlStr)
+}
+
 func (bitstamp *Bitstamp) LimitBuy(amount, price string, currency CurrencyPair) (*Order, error) {
-	return bitstamp.placeOrder("buy", currency, amount, price)
+	return bitstamp.placeLimitOrder("buy", currency, amount, price)
 }
 
 func (bitstamp *Bitstamp) LimitSell(amount, price string, currency CurrencyPair) (*Order, error) {
-	return bitstamp.placeOrder("sell", currency, amount, price)
+	return bitstamp.placeLimitOrder("sell", currency, amount, price)
 }
 
 func (bitstamp *Bitstamp) MarketBuy(amount, price string, currency CurrencyPair) (*Order, error) {
-	panic("not implement")
+	return bitstamp.placeMarketOrder("buy", currency, amount)
 }
 
 func (bitstamp *Bitstamp) MarketSell(amount, price string, currency CurrencyPair) (*Order, error) {
-	panic("not implement")
+	return bitstamp.placeMarketOrder("sell", currency, amount)
 }
 
 func (bitstamp *Bitstamp) CancelOrder(orderId string, currency CurrencyPair) (bool, error) {
@@ -198,7 +221,7 @@ func (bitstamp *Bitstamp) GetOneOrder(orderId string, currency CurrencyPair) (*O
 	if err != nil {
 		return nil, err
 	}
-	println(string(resp))
+	//println(string(resp))
 	respmap := make(map[string]interface{})
 	err = json.Unmarshal(resp, &respmap)
 	if err != nil {
@@ -216,6 +239,7 @@ func (bitstamp *Bitstamp) GetOneOrder(orderId string, currency CurrencyPair) (*O
 	ord := Order{}
 	ord.Currency = currency
 	ord.OrderID = ToInt(orderId)
+	ord.OrderID2 = orderId
 
 	if status == "Finished" {
 		ord.Status = ORDER_FINISH
@@ -227,8 +251,13 @@ func (bitstamp *Bitstamp) GetOneOrder(orderId string, currency CurrencyPair) (*O
 		if ord.Status != ORDER_FINISH {
 			ord.Status = ORDER_PART_FINISH
 		}
-		var dealAmount float64
-		var tradeAmount float64
+
+		var (
+			dealAmount  float64
+			tradeAmount float64
+			fee float64
+		)
+
 		currencyStr := strings.ToLower(currency.CurrencyA.Symbol)
 		for _, v := range transactions {
 			transaction := v.(map[string]interface{})
@@ -236,15 +265,17 @@ func (bitstamp *Bitstamp) GetOneOrder(orderId string, currency CurrencyPair) (*O
 			amount := ToFloat64(transaction[currencyStr])
 			dealAmount += amount
 			tradeAmount += amount * price
-
-			tpy := ToInt(transaction["type"])
-			if tpy == 2 {
-				ord.Side = SELL
-			}
+			fee += ToFloat64(transaction["fee"])
+			//tpy := ToInt(transaction["type"]) //注意:不是交易方向，type (0 - deposit; 1 - withdrawal; 2 - market trade)
+			//if tpy == 2 {
+			//	ord.Side = SELL
+			//}
 		}
+
 		avgPrice := tradeAmount / dealAmount
 		ord.DealAmount = dealAmount
 		ord.AvgPrice = avgPrice
+		ord.Fee = fee
 	}
 
 	//	println(string(resp))
@@ -267,7 +298,7 @@ func (bitstamp *Bitstamp) GetUnfinishOrders(currency CurrencyPair) ([]Order, err
 		log.Println(string(resp))
 		return nil, err
 	}
-	//log.Println(respmap)
+	log.Println(respmap)
 	orders := make([]Order, 0)
 	for _, v := range respmap {
 		ord := v.(map[string]interface{})
@@ -279,6 +310,7 @@ func (bitstamp *Bitstamp) GetUnfinishOrders(currency CurrencyPair) ([]Order, err
 		orderTime, _ := time.Parse("2006-01-02 15:04:05", ord["datetime"].(string))
 		orders = append(orders, Order{
 			OrderID:   ToInt(ord["id"]),
+			OrderID2:  fmt.Sprint(ToInt(ord["id"])),
 			Currency:  currency,
 			Price:     ToFloat64(ord["price"]),
 			Amount:    ToFloat64(ord["amount"]),
@@ -367,5 +399,5 @@ func (bitstamp *Bitstamp) GetTrades(currencyPair CurrencyPair, since int64) ([]T
 }
 
 func (bitstamp *Bitstamp) GetExchangeName() string {
-	return "bitstamp.net"
+	return BITSTAMP
 }

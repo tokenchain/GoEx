@@ -14,10 +14,9 @@ import (
 )
 
 const (
-	EXCHANGE_NAME = "zb.com"
-	MARKET_URL    = "http://api.zb.com/data/v1/"
-	TICKER_API    = "ticker?market=%s"
-	DEPTH_API     = "depth?market=%s&size=%d"
+	MARKET_URL = "http://api.zb.com/data/v1/"
+	TICKER_API = "ticker?market=%s"
+	DEPTH_API  = "depth?market=%s&size=%d"
 
 	TRADE_URL                 = "https://trade.zb.com/api/"
 	GET_ACCOUNT_API           = "getAccountInfo"
@@ -40,11 +39,12 @@ func New(httpClient *http.Client, accessKey, secretKey string) *Zb {
 }
 
 func (zb *Zb) GetExchangeName() string {
-	return EXCHANGE_NAME
+	return ZB
 }
 
 func (zb *Zb) GetTicker(currency CurrencyPair) (*Ticker, error) {
-	resp, err := HttpGet(zb.httpClient, MARKET_URL+fmt.Sprintf(TICKER_API, strings.ToLower(currency.ToSymbol("_"))))
+	symbol := currency.AdaptBchToBcc().AdaptUsdToUsdt().ToSymbol("_")
+	resp, err := HttpGet(zb.httpClient, MARKET_URL+fmt.Sprintf(TICKER_API, symbol))
 	if err != nil {
 		return nil, err
 	}
@@ -52,6 +52,7 @@ func (zb *Zb) GetTicker(currency CurrencyPair) (*Ticker, error) {
 	tickermap := resp["ticker"].(map[string]interface{})
 
 	ticker := new(Ticker)
+	ticker.Pair = currency
 	ticker.Date, _ = strconv.ParseUint(resp["date"].(string), 10, 64)
 	ticker.Buy, _ = strconv.ParseFloat(tickermap["buy"].(string), 64)
 	ticker.Sell, _ = strconv.ParseFloat(tickermap["sell"].(string), 64)
@@ -64,20 +65,25 @@ func (zb *Zb) GetTicker(currency CurrencyPair) (*Ticker, error) {
 }
 
 func (zb *Zb) GetDepth(size int, currency CurrencyPair) (*Depth, error) {
-	resp, err := HttpGet(zb.httpClient, MARKET_URL+fmt.Sprintf(DEPTH_API, currency.ToSymbol("_"), size))
+	symbol := currency.AdaptBchToBcc().AdaptUsdToUsdt().ToSymbol("_")
+	resp, err := HttpGet(zb.httpClient, MARKET_URL+fmt.Sprintf(DEPTH_API, symbol, size))
 	if err != nil {
 		return nil, err
 	}
 
-	log.Println(resp)
+	//log.Println(resp)
 
-	asks := resp["asks"].([]interface{})
-	bids := resp["bids"].([]interface{})
-
+	asks, isok1 := resp["asks"].([]interface{})
+	bids, isok2 := resp["bids"].([]interface{})
+	
+	if isok2 != true || isok1 != true {
+		return nil, errors.New("no depth data!")
+	}
 	//log.Println(asks)
 	//log.Println(bids)
 
 	depth := new(Depth)
+	depth.Pair = currency
 
 	for _, e := range bids {
 		var r DepthRecord
@@ -139,7 +145,7 @@ func (zb *Zb) GetAccount() (*Account, error) {
 	}
 
 	acc := new(Account)
-	acc.Exchange = EXCHANGE_NAME
+	acc.Exchange = zb.GetExchangeName()
 	acc.SubAccounts = make(map[Currency]SubAccount)
 
 	resultmap := respmap["result"].(map[string]interface{})
@@ -153,7 +159,7 @@ func (zb *Zb) GetAccount() (*Account, error) {
 		subAcc := SubAccount{}
 		subAcc.Amount = ToFloat64(vv["available"])
 		subAcc.ForzenAmount = ToFloat64(vv["freez"])
-		subAcc.Currency = NewCurrency(vv["key"].(string), "")
+		subAcc.Currency = NewCurrency(vv["key"].(string), "").AdaptBchToBcc()
 		acc.SubAccounts[subAcc.Currency] = subAcc
 	}
 
@@ -164,11 +170,12 @@ func (zb *Zb) GetAccount() (*Account, error) {
 }
 
 func (zb *Zb) placeOrder(amount, price string, currency CurrencyPair, tradeType int) (*Order, error) {
+	symbol := currency.AdaptBchToBcc().AdaptUsdToUsdt().ToSymbol("_")
 	params := url.Values{}
 	params.Set("method", "order")
 	params.Set("price", price)
 	params.Set("amount", amount)
-	params.Set("currency", currency.ToSymbol("_"))
+	params.Set("currency", symbol)
 	params.Set("tradeType", fmt.Sprintf("%d", tradeType))
 	zb.buildPostForm(&params)
 
@@ -222,10 +229,11 @@ func (zb *Zb) LimitSell(amount, price string, currency CurrencyPair) (*Order, er
 }
 
 func (zb *Zb) CancelOrder(orderId string, currency CurrencyPair) (bool, error) {
+	symbol := currency.AdaptBchToBcc().AdaptUsdToUsdt().ToSymbol("_")
 	params := url.Values{}
 	params.Set("method", "cancelOrder")
 	params.Set("id", orderId)
-	params.Set("currency", currency.ToSymbol("_"))
+	params.Set("currency", symbol)
 	zb.buildPostForm(&params)
 
 	resp, err := HttpPostForm(zb.httpClient, TRADE_URL+CANCEL_ORDER_API, params)
@@ -255,12 +263,13 @@ func parseOrder(order *Order, ordermap map[string]interface{}) {
 	//log.Println(ordermap)
 	//order.Currency = currency;
 	order.OrderID, _ = strconv.Atoi(ordermap["id"].(string))
+	order.OrderID2 = ordermap["id"].(string)
 	order.Amount = ordermap["total_amount"].(float64)
 	order.DealAmount = ordermap["trade_amount"].(float64)
 	order.Price = ordermap["price"].(float64)
 	//	order.Fee = ordermap["fees"].(float64)
 	if order.DealAmount > 0 {
-		order.AvgPrice = ordermap["trade_money"].(float64) / order.DealAmount
+		order.AvgPrice = ToFloat64(ordermap["trade_money"]) / order.DealAmount
 	} else {
 		order.AvgPrice = 0
 	}
@@ -292,10 +301,11 @@ func parseOrder(order *Order, ordermap map[string]interface{}) {
 }
 
 func (zb *Zb) GetOneOrder(orderId string, currency CurrencyPair) (*Order, error) {
+	symbol := currency.AdaptBchToBcc().AdaptUsdToUsdt().ToSymbol("_")
 	params := url.Values{}
 	params.Set("method", "getOrder")
 	params.Set("id", orderId)
-	params.Set("currency", currency.ToSymbol("_"))
+	params.Set("currency", symbol)
 	zb.buildPostForm(&params)
 
 	resp, err := HttpPostForm(zb.httpClient, TRADE_URL+GET_ORDER_API, params)
@@ -321,8 +331,9 @@ func (zb *Zb) GetOneOrder(orderId string, currency CurrencyPair) (*Order, error)
 
 func (zb *Zb) GetUnfinishOrders(currency CurrencyPair) ([]Order, error) {
 	params := url.Values{}
+	symbol := currency.AdaptBchToBcc().AdaptUsdToUsdt().ToSymbol("_")
 	params.Set("method", "getUnfinishedOrdersIgnoreTradeType")
-	params.Set("currency", currency.ToSymbol("_"))
+	params.Set("currency", symbol)
 	params.Set("pageIndex", "1")
 	params.Set("pageSize", "100")
 	zb.buildPostForm(&params)
@@ -371,7 +382,7 @@ func (zb *Zb) GetKlineRecords(currency CurrencyPair, period, size, since int) ([
 func (zb *Zb) Withdraw(amount string, currency Currency, fees, receiveAddr, safePwd string) (string, error) {
 	params := url.Values{}
 	params.Set("method", "withdraw")
-	params.Set("currency", strings.ToLower(currency.String()))
+	params.Set("currency", strings.ToLower(currency.AdaptBchToBcc().String()))
 	params.Set("amount", amount)
 	params.Set("fees", fees)
 	params.Set("receiveAddr", receiveAddr)
@@ -401,7 +412,7 @@ func (zb *Zb) Withdraw(amount string, currency Currency, fees, receiveAddr, safe
 func (zb *Zb) CancelWithdraw(id string, currency Currency, safePwd string) (bool, error) {
 	params := url.Values{}
 	params.Set("method", "cancelWithdraw")
-	params.Set("currency", strings.ToLower(currency.String()))
+	params.Set("currency", strings.ToLower(currency.AdaptBchToBcc().String()))
 	params.Set("downloadId", id)
 	params.Set("safePwd", safePwd)
 	zb.buildPostForm(&params)

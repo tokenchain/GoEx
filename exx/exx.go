@@ -1,4 +1,4 @@
-package chbtc
+package exx
 
 import (
 	"encoding/json"
@@ -8,18 +8,21 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	MARKET_URL = "http://api.chbtc.com/data/v1/"
-	TICKER_API = "ticker?currency=%s"
-	DEPTH_API  = "depth?currency=%s&size=%d"
+	EXX			 = "EXX"
+	API_BASE_URL = "https://api.exx.com/"
+	MARKET_URL   = "http://api.exx.com/data/v1/"
+	TICKER_API   = "ticker?currency=%s"
+	DEPTH_API    = "depth?currency=%s"
 
-	TRADE_URL                 = "https://trade.chbtc.com/api/"
-	GET_ACCOUNT_API           = "getAccountInfo"
+	TRADE_URL                 = "https://trade.exx.com/api/"
+	GET_ACCOUNT_API           = "getBalance"
 	GET_ORDER_API             = "getOrder"
 	GET_UNFINISHED_ORDERS_API = "getUnfinishedOrdersIgnoreTradeType"
 	CANCEL_ORDER_API          = "cancelOrder"
@@ -28,29 +31,36 @@ const (
 	CANCELWITHDRAW_API        = "cancelWithdraw"
 )
 
-type Chbtc struct {
+type Exx struct {
 	httpClient *http.Client
 	accessKey,
 	secretKey string
 }
 
-func New(httpClient *http.Client, accessKey, secretKey string) *Chbtc {
-	return &Chbtc{httpClient, accessKey, secretKey}
+func New(httpClient *http.Client, accessKey, secretKey string) *Exx {
+	return &Exx{httpClient, accessKey, secretKey}
 }
 
-func (chbtc *Chbtc) GetExchangeName() string {
-	return "chbtc.com"
+func (exx *Exx) GetExchangeName() string {
+	return EXX
 }
 
-func (chbtc *Chbtc) GetTicker(currency CurrencyPair) (*Ticker, error) {
-	resp, err := HttpGet(chbtc.httpClient, MARKET_URL+fmt.Sprintf(TICKER_API, strings.ToLower(currency.ToSymbol("_"))))
+func (exx *Exx) GetTicker(currency CurrencyPair) (*Ticker, error) {
+	symbol := currency.AdaptBchToBcc().AdaptUsdToUsdt().ToLower().ToSymbol("_")
+	path := MARKET_URL + fmt.Sprintf(TICKER_API, symbol)
+	resp, err := HttpGet(exx.httpClient, path)
 	if err != nil {
 		return nil, err
 	}
+	//log.Println(path)
 	//log.Println(resp)
-	tickermap := resp["ticker"].(map[string]interface{})
+	if err, isok := resp["error"].(string); isok {
+		return nil, errors.New(err)
+	}
+	tickermap, _ := resp["ticker"].(map[string]interface{})
 
 	ticker := new(Ticker)
+	ticker.Pair = currency
 	ticker.Date, _ = strconv.ParseUint(resp["date"].(string), 10, 64)
 	ticker.Buy, _ = strconv.ParseFloat(tickermap["buy"].(string), 64)
 	ticker.Sell, _ = strconv.ParseFloat(tickermap["sell"].(string), 64)
@@ -62,27 +72,34 @@ func (chbtc *Chbtc) GetTicker(currency CurrencyPair) (*Ticker, error) {
 	return ticker, nil
 }
 
-func (chbtc *Chbtc) GetDepth(size int, currency CurrencyPair) (*Depth, error) {
-	resp, err := HttpGet(chbtc.httpClient, MARKET_URL+fmt.Sprintf(DEPTH_API, currency.ToSymbol("_"), size))
+func (exx *Exx) GetDepth(size int, currency CurrencyPair) (*Depth, error) {
+	symbol := currency.AdaptBchToBcc().AdaptUsdToUsdt().ToSymbol("_")
+	resp, err := HttpGet(exx.httpClient, MARKET_URL+fmt.Sprintf(DEPTH_API, symbol))
 	if err != nil {
 		return nil, err
 	}
 
 	log.Println(resp)
 
-	asks := resp["asks"].([]interface{})
-	bids := resp["bids"].([]interface{})
+	//asks := resp["asks"].([]interface{})
+	//bids := resp["bids"].([]interface{})
 
-	//log.Println(asks)
-	//log.Println(bids)
+	asks, ok1 := resp["asks"].([]interface{})
+	bids, ok2 := resp["bids"].([]interface{})
+	if ok1 != true || ok2 != true {
+		return nil, errors.New("no depth data")
+	}
+	log.Println(asks)
+	log.Println(bids)
 
 	depth := new(Depth)
+	depth.Pair = currency
 
 	for _, e := range bids {
 		var r DepthRecord
 		ee := e.([]interface{})
-		r.Amount = ee[1].(float64)
-		r.Price = ee[0].(float64)
+		r.Amount = ToFloat64(ee[1])
+		r.Price = ToFloat64(ee[0])
 
 		depth.BidList = append(depth.BidList, r)
 	}
@@ -90,97 +107,66 @@ func (chbtc *Chbtc) GetDepth(size int, currency CurrencyPair) (*Depth, error) {
 	for _, e := range asks {
 		var r DepthRecord
 		ee := e.([]interface{})
-		r.Amount = ee[1].(float64)
-		r.Price = ee[0].(float64)
+		r.Amount = ToFloat64(ee[1])
+		r.Price = ToFloat64(ee[0])
 
 		depth.AskList = append(depth.AskList, r)
 	}
+	sort.Sort(depth.AskList)
+	depth.AskList = depth.AskList[0:size]
+	depth.BidList = depth.BidList[0:size]
 
 	return depth, nil
 }
 
-func (chbtc *Chbtc) buildPostForm(postForm *url.Values) error {
-	postForm.Set("accesskey", chbtc.accessKey)
-
+func (exx *Exx) buildPostForm(postForm *url.Values) error {
+	postForm.Set("accesskey", exx.accessKey)
+	nonce := time.Now().UnixNano() / 1000000
+	postForm.Set("nonce", strconv.Itoa(int(nonce)))
+	//postForm.Set("nonce", "1234567890123")
 	payload := postForm.Encode()
-	secretkeySha, _ := GetSHA(chbtc.secretKey)
 
-	sign, err := GetParamHmacMD5Sign(secretkeySha, payload)
+	sign, err := GetParamHmacSHA512Sign(exx.secretKey, payload)
 	if err != nil {
 		return err
 	}
-
-	postForm.Set("sign", sign)
+	//log.Println(payload)
+	postForm.Set("signature", sign)
 	//postForm.Del("secret_key")
-	postForm.Set("reqTime", fmt.Sprintf("%d", time.Now().UnixNano()/1000000))
+	//postForm.Set("reqTime", fmt.Sprintf("%d", time.Now().UnixNano()/1000000))
 	return nil
 }
 
-func (chbtc *Chbtc) GetAccount() (*Account, error) {
+func (exx *Exx) GetAccount() (*Account, error) {
 	params := url.Values{}
-	params.Set("method", "getAccountInfo")
-	chbtc.buildPostForm(&params)
-	//log.Println(params.Encode())
-	resp, err := HttpPostForm(chbtc.httpClient, TRADE_URL+GET_ACCOUNT_API, params)
+	exx.buildPostForm(&params)
+	log.Println(params.Encode())
+	log.Println(TRADE_URL + GET_ACCOUNT_API + "?" + params.Encode())
+	respmap, err := HttpGet(exx.httpClient, TRADE_URL+GET_ACCOUNT_API+"?"+params.Encode())
 	if err != nil {
 		return nil, err
 	}
 
-	var respmap map[string]interface{}
-	err = json.Unmarshal(resp, &respmap)
-	if err != nil {
-		log.Println("json unmarshal error")
-		return nil, err
-	}
-
-	//log.Println(respmap)
 	if respmap["code"] != nil && respmap["code"].(float64) != 1000 {
-		return nil, errors.New(string(resp))
+		//return nil, errors.New(string(resp))
 	}
 
 	acc := new(Account)
-	acc.Exchange = "chbtc"
+	acc.Exchange = exx.GetExchangeName()
 	acc.SubAccounts = make(map[Currency]SubAccount)
 
 	resultmap := respmap["result"].(map[string]interface{})
-	balancemap := resultmap["balance"].(map[string]interface{})
-	frozenmap := resultmap["frozen"].(map[string]interface{})
-	p2pmap := resultmap["p2p"].(map[string]interface{})
+	coins := resultmap["coins"].([]interface{})
 
 	acc.NetAsset = ToFloat64(resultmap["netAssets"])
 	acc.Asset = ToFloat64(resultmap["totalAssets"])
 
-	for t, v := range balancemap {
+	for _, v := range coins {
 		vv := v.(map[string]interface{})
-		frozen := frozenmap["CNY"].(map[string]interface{})
 		subAcc := SubAccount{}
-		subAcc.Amount = ToFloat64(vv["amount"])
-		subAcc.ForzenAmount = ToFloat64(frozen["amount"])
-		subAcc.LoanAmount = ToFloat64(p2pmap[fmt.Sprintf("in%s", t)])
-
-		switch t {
-		case "CNY":
-			subAcc.Currency = CNY
-		case "BTC":
-			subAcc.Currency = BTC
-		case "LTC":
-			subAcc.Currency = LTC
-		case "ETH":
-			subAcc.Currency = ETH
-		case "ETC":
-			subAcc.Currency = ETC
-		case "BTS":
-			subAcc.Currency = BTS
-		case "EOS":
-			subAcc.Currency = EOS
-		case "BCC":
-			subAcc.Currency = BCC
-		case "QTUM":
-			subAcc.Currency = QTUM
-		default:
-			log.Println("unknown ", t)
-
-		}
+		subAcc.Amount = ToFloat64(vv["available"])
+		subAcc.ForzenAmount = ToFloat64(vv["freez"])
+		subAcc.Currency = NewCurrency(vv["key"].(string), "").AdaptBchToBcc()
 		acc.SubAccounts[subAcc.Currency] = subAcc
 	}
 
@@ -190,18 +176,19 @@ func (chbtc *Chbtc) GetAccount() (*Account, error) {
 	return acc, nil
 }
 
-func (chbtc *Chbtc) placeOrder(amount, price string, currency CurrencyPair, tradeType int) (*Order, error) {
+func (exx *Exx) placeOrder(amount, price string, currency CurrencyPair, tradeType int) (*Order, error) {
+	symbol := currency.AdaptBchToBcc().AdaptUsdToUsdt().ToSymbol("_")
 	params := url.Values{}
 	params.Set("method", "order")
 	params.Set("price", price)
 	params.Set("amount", amount)
-	params.Set("currency", currency.ToSymbol("_"))
+	params.Set("currency", symbol)
 	params.Set("tradeType", fmt.Sprintf("%d", tradeType))
-	chbtc.buildPostForm(&params)
+	exx.buildPostForm(&params)
 
-	resp, err := HttpPostForm(chbtc.httpClient, TRADE_URL+PLACE_ORDER_API, params)
+	resp, err := HttpPostForm(exx.httpClient, TRADE_URL+PLACE_ORDER_API, params)
 	if err != nil {
-		log.Println(err)
+		//log.Println(err)
 		return nil, err
 	}
 
@@ -210,13 +197,13 @@ func (chbtc *Chbtc) placeOrder(amount, price string, currency CurrencyPair, trad
 	respmap := make(map[string]interface{})
 	err = json.Unmarshal(resp, &respmap)
 	if err != nil {
-		log.Println(err)
+		//log.Println(err)
 		return nil, err
 	}
 
 	code := respmap["code"].(float64)
 	if code != 1000 {
-		log.Println(string(resp))
+		//log.Println(string(resp))
 		return nil, errors.New(fmt.Sprintf("%.0f", code))
 	}
 
@@ -240,31 +227,33 @@ func (chbtc *Chbtc) placeOrder(amount, price string, currency CurrencyPair, trad
 	return order, nil
 }
 
-func (chbtc *Chbtc) LimitBuy(amount, price string, currency CurrencyPair) (*Order, error) {
-	return chbtc.placeOrder(amount, price, currency, 1)
+func (exx *Exx) LimitBuy(amount, price string, currency CurrencyPair) (*Order, error) {
+	return exx.placeOrder(amount, price, currency, 1)
 }
 
-func (chbtc *Chbtc) LimitSell(amount, price string, currency CurrencyPair) (*Order, error) {
-	return chbtc.placeOrder(amount, price, currency, 0)
+func (exx *Exx) LimitSell(amount, price string, currency CurrencyPair) (*Order, error) {
+	return exx.placeOrder(amount, price, currency, 0)
 }
 
-func (chbtc *Chbtc) CancelOrder(orderId string, currency CurrencyPair) (bool, error) {
+func (exx *Exx) CancelOrder(orderId string, currency CurrencyPair) (bool, error) {
+
+	symbol := currency.AdaptBchToBcc().AdaptUsdToUsdt().ToSymbol("_")
 	params := url.Values{}
 	params.Set("method", "cancelOrder")
 	params.Set("id", orderId)
-	params.Set("currency", currency.ToSymbol("_"))
-	chbtc.buildPostForm(&params)
+	params.Set("currency", symbol)
+	exx.buildPostForm(&params)
 
-	resp, err := HttpPostForm(chbtc.httpClient, TRADE_URL+CANCEL_ORDER_API, params)
+	resp, err := HttpPostForm(exx.httpClient, TRADE_URL+CANCEL_ORDER_API, params)
 	if err != nil {
-		log.Println(err)
+		//log.Println(err)
 		return false, err
 	}
 
 	respmap := make(map[string]interface{})
 	err = json.Unmarshal(resp, &respmap)
 	if err != nil {
-		log.Println(err)
+		//log.Println(err)
 		return false, err
 	}
 
@@ -282,10 +271,11 @@ func parseOrder(order *Order, ordermap map[string]interface{}) {
 	//log.Println(ordermap)
 	//order.Currency = currency;
 	order.OrderID, _ = strconv.Atoi(ordermap["id"].(string))
+	order.OrderID2 = ordermap["id"].(string)
 	order.Amount = ordermap["total_amount"].(float64)
 	order.DealAmount = ordermap["trade_amount"].(float64)
 	order.Price = ordermap["price"].(float64)
-//	order.Fee = ordermap["fees"].(float64)
+	//	order.Fee = ordermap["fees"].(float64)
 	if order.DealAmount > 0 {
 		order.AvgPrice = ordermap["trade_money"].(float64) / order.DealAmount
 	} else {
@@ -313,29 +303,29 @@ func parseOrder(order *Order, ordermap map[string]interface{}) {
 	case 2:
 		order.Status = ORDER_FINISH
 	case 3:
-		order.Status = ORDER_PART_FINISH
-
+		order.Status = ORDER_UNFINISH
 	}
 
 }
 
-func (chbtc *Chbtc) GetOneOrder(orderId string, currency CurrencyPair) (*Order, error) {
+func (exx *Exx) GetOneOrder(orderId string, currency CurrencyPair) (*Order, error) {
+	symbol := currency.AdaptBchToBcc().AdaptUsdToUsdt().ToSymbol("_")
 	params := url.Values{}
 	params.Set("method", "getOrder")
 	params.Set("id", orderId)
-	params.Set("currency", currency.ToSymbol("_"))
-	chbtc.buildPostForm(&params)
+	params.Set("currency", symbol)
+	exx.buildPostForm(&params)
 
-	resp, err := HttpPostForm(chbtc.httpClient, TRADE_URL+GET_ORDER_API, params)
+	resp, err := HttpPostForm(exx.httpClient, TRADE_URL+GET_ORDER_API, params)
 	if err != nil {
-		log.Println(err)
+		//log.Println(err)
 		return nil, err
 	}
 	//println(string(resp))
 	ordermap := make(map[string]interface{})
 	err = json.Unmarshal(resp, &ordermap)
 	if err != nil {
-		log.Println(err)
+		//log.Println(err)
 		return nil, err
 	}
 
@@ -347,17 +337,18 @@ func (chbtc *Chbtc) GetOneOrder(orderId string, currency CurrencyPair) (*Order, 
 	return order, nil
 }
 
-func (chbtc *Chbtc) GetUnfinishOrders(currency CurrencyPair) ([]Order, error) {
+func (exx *Exx) GetUnfinishOrders(currency CurrencyPair) ([]Order, error) {
 	params := url.Values{}
+	symbol := currency.AdaptBchToBcc().AdaptUsdToUsdt().ToSymbol("_")
 	params.Set("method", "getUnfinishedOrdersIgnoreTradeType")
-	params.Set("currency", currency.ToSymbol("_"))
+	params.Set("currency", symbol)
 	params.Set("pageIndex", "1")
 	params.Set("pageSize", "100")
-	chbtc.buildPostForm(&params)
+	exx.buildPostForm(&params)
 
-	resp, err := HttpPostForm(chbtc.httpClient, TRADE_URL+GET_UNFINISHED_ORDERS_API, params)
+	resp, err := HttpPostForm(exx.httpClient, TRADE_URL+GET_UNFINISHED_ORDERS_API, params)
 	if err != nil {
-		log.Println(err)
+		//log.Println(err)
 		return nil, err
 	}
 
@@ -365,14 +356,14 @@ func (chbtc *Chbtc) GetUnfinishOrders(currency CurrencyPair) ([]Order, error) {
 	//println(respstr)
 
 	if strings.Contains(respstr, "\"code\":3001") {
-		log.Println(respstr)
+		//log.Println(respstr)
 		return nil, nil
 	}
 
 	var resps []interface{}
 	err = json.Unmarshal(resp, &resps)
 	if err != nil {
-		log.Println(err)
+		//log.Println(err)
 		return nil, err
 	}
 
@@ -388,34 +379,34 @@ func (chbtc *Chbtc) GetUnfinishOrders(currency CurrencyPair) ([]Order, error) {
 	return orders, nil
 }
 
-func (chbtc *Chbtc) GetOrderHistorys(currency CurrencyPair, currentPage, pageSize int) ([]Order, error) {
+func (exx *Exx) GetOrderHistorys(currency CurrencyPair, currentPage, pageSize int) ([]Order, error) {
 	return nil, nil
 }
 
-func (chbtc *Chbtc) GetKlineRecords(currency CurrencyPair, period , size, since int) ([]Kline, error) {
+func (exx *Exx) GetKlineRecords(currency CurrencyPair, period, size, since int) ([]Kline, error) {
 	return nil, nil
 }
 
-func (chbtc *Chbtc) Withdraw(amount string, currency Currency, fees, receiveAddr, safePwd string) (string, error) {
+func (exx *Exx) Withdraw(amount string, currency Currency, fees, receiveAddr, safePwd string) (string, error) {
 	params := url.Values{}
 	params.Set("method", "withdraw")
-	params.Set("currency", strings.ToLower(currency.String()))
+	params.Set("currency", strings.ToLower(currency.AdaptBchToBcc().String()))
 	params.Set("amount", amount)
 	params.Set("fees", fees)
 	params.Set("receiveAddr", receiveAddr)
 	params.Set("safePwd", safePwd)
-	chbtc.buildPostForm(&params)
+	exx.buildPostForm(&params)
 
-	resp, err := HttpPostForm(chbtc.httpClient, TRADE_URL+WITHDRAW_API, params)
+	resp, err := HttpPostForm(exx.httpClient, TRADE_URL+WITHDRAW_API, params)
 	if err != nil {
-		log.Println("withdraw fail.", err)
+		//log.Println("withdraw fail.", err)
 		return "", err
 	}
 
 	respMap := make(map[string]interface{})
 	err = json.Unmarshal(resp, &respMap)
 	if err != nil {
-		log.Println(err, string(resp))
+		//log.Println(err, string(resp))
 		return "", err
 	}
 
@@ -426,24 +417,24 @@ func (chbtc *Chbtc) Withdraw(amount string, currency Currency, fees, receiveAddr
 	return "", errors.New(string(resp))
 }
 
-func (chbtc *Chbtc) CancelWithdraw(id string, currency Currency, safePwd string) (bool, error) {
+func (exx *Exx) CancelWithdraw(id string, currency Currency, safePwd string) (bool, error) {
 	params := url.Values{}
 	params.Set("method", "cancelWithdraw")
-	params.Set("currency", strings.ToLower(currency.String()))
+	params.Set("currency", strings.ToLower(currency.AdaptBchToBcc().String()))
 	params.Set("downloadId", id)
 	params.Set("safePwd", safePwd)
-	chbtc.buildPostForm(&params)
+	exx.buildPostForm(&params)
 
-	resp, err := HttpPostForm(chbtc.httpClient, TRADE_URL+CANCELWITHDRAW_API, params)
+	resp, err := HttpPostForm(exx.httpClient, TRADE_URL+CANCELWITHDRAW_API, params)
 	if err != nil {
-		log.Println("cancel withdraw fail.", err)
+		//log.Println("cancel withdraw fail.", err)
 		return false, err
 	}
 
 	respMap := make(map[string]interface{})
 	err = json.Unmarshal(resp, &respMap)
 	if err != nil {
-		log.Println(err, string(resp))
+		//log.Println(err, string(resp))
 		return false, err
 	}
 
@@ -454,14 +445,14 @@ func (chbtc *Chbtc) CancelWithdraw(id string, currency Currency, safePwd string)
 	return false, errors.New(string(resp))
 }
 
-func (chbtc *Chbtc) GetTrades(currencyPair CurrencyPair, since int64) ([]Trade, error) {
+func (exx *Exx) GetTrades(currencyPair CurrencyPair, since int64) ([]Trade, error) {
 	panic("unimplements")
 }
 
-func (chbtc *Chbtc) MarketBuy(amount, price string, currency CurrencyPair) (*Order, error) {
+func (exx *Exx) MarketBuy(amount, price string, currency CurrencyPair) (*Order, error) {
 	panic("unsupport the market order")
 }
 
-func (chbtc *Chbtc) MarketSell(amount, price string, currency CurrencyPair) (*Order, error) {
+func (exx *Exx) MarketSell(amount, price string, currency CurrencyPair) (*Order, error) {
 	panic("unsupport the market order")
 }

@@ -11,18 +11,21 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
 	FUTURE_API_BASE_URL    = "https://www.okex.com/api/v1/"
 	FUTURE_TICKER_URI      = "future_ticker.do?symbol=%s&contract_type=%s"
 	FUTURE_DEPTH_URI       = "future_depth.do?symbol=%s&contract_type=%s"
+	FUTURE_INDEX_PRICE     = "future_index.do?symbol=%s"
 	FUTURE_USERINFO_URI    = "future_userinfo.do"
 	FUTURE_CANCEL_URI      = "future_cancel.do"
 	FUTURE_ORDER_INFO_URI  = "future_order_info.do"
 	FUTURE_ORDERS_INFO_URI = "future_orders_info.do"
 	FUTURE_POSITION_URI    = "future_position.do"
 	FUTURE_TRADE_URI       = "future_trade.do"
+	TRADES_URI             = "future_trades.do"
 	FUTURE_ESTIMATED_PRICE = "future_estimated_price.do?symbol=%s"
 	_EXCHANGE_RATE_URI     = "exchange_rate.do"
 	_GET_KLINE_URI         = "future_kline.do"
@@ -31,7 +34,12 @@ const (
 type OKEx struct {
 	apiKey,
 	apiSecretKey string
-	client *http.Client
+	client            *http.Client
+	ws                *WsConn
+	createWsLock      sync.Mutex
+	wsTickerHandleMap map[string]func(*Ticker)
+	wsDepthHandleMap  map[string]func(*Depth)
+	wsTradeHandleMap  map[string]func(*Trade)
 }
 
 func NewOKEx(client *http.Client, api_key, secret_key string) *OKEx {
@@ -62,7 +70,7 @@ func (ok *OKEx) buildPostForm(postForm *url.Values) error {
 }
 
 func (ok *OKEx) GetExchangeName() string {
-	return "okex.com"
+	return OKEX_FUTURE
 }
 
 func (ok *OKEx) GetFutureEstimatedPrice(currencyPair CurrencyPair) (float64, error) {
@@ -212,7 +220,28 @@ func (ok *OKEx) GetFutureDepth(currencyPair CurrencyPair, contractType string, s
 }
 
 func (ok *OKEx) GetFutureIndex(currencyPair CurrencyPair) (float64, error) {
-	return 0, nil
+	resp, err := ok.client.Get(fmt.Sprintf(FUTURE_API_BASE_URL+FUTURE_INDEX_PRICE, strings.ToLower(currencyPair.ToSymbol("_"))))
+	if err != nil {
+		return 0, err
+	}
+
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+
+	if err != nil {
+		return 0, err
+	}
+
+	bodyMap := make(map[string]interface{})
+
+	err = json.Unmarshal(body, &bodyMap)
+	if err != nil {
+		return 0, err
+	}
+
+	//println(string(body))
+	return bodyMap["future_index"].(float64), nil
 }
 
 type futureUserInfoResponse struct {
@@ -222,6 +251,9 @@ type futureUserInfoResponse struct {
 		Etc map[string]float64 `json:"etc"`
 		Eth map[string]float64 `json:"eth"`
 		Bch map[string]float64 `json:"bch"`
+		Xrp map[string]float64 `json:"xrp"`
+		Eos map[string]float64 `json:"eos"`
+		Btg map[string]float64 `json:"btg"`
 	} `json:info`
 	Result     bool `json:"result,bool"`
 	Error_code int  `json:"error_code"`
@@ -258,12 +290,18 @@ func (ok *OKEx) GetFutureUserinfo() (*FutureAccount, error) {
 	bchMap := resp.Info.Bch
 	ethMap := resp.Info.Eth
 	etcMap := resp.Info.Etc
+	xrpMap := resp.Info.Xrp
+	eosMap := resp.Info.Eos
+	btgMap := resp.Info.Btg
 
 	account.FutureSubAccounts[BTC] = FutureSubAccount{BTC, btcMap["account_rights"], btcMap["keep_deposit"], btcMap["profit_real"], btcMap["profit_unreal"], btcMap["risk_rate"]}
 	account.FutureSubAccounts[LTC] = FutureSubAccount{LTC, ltcMap["account_rights"], ltcMap["keep_deposit"], ltcMap["profit_real"], ltcMap["profit_unreal"], ltcMap["risk_rate"]}
 	account.FutureSubAccounts[BCH] = FutureSubAccount{BCH, bchMap["account_rights"], bchMap["keep_deposit"], bchMap["profit_real"], bchMap["profit_unreal"], bchMap["risk_rate"]}
 	account.FutureSubAccounts[ETH] = FutureSubAccount{ETH, ethMap["account_rights"], ethMap["keep_deposit"], ethMap["profit_real"], ethMap["profit_unreal"], ethMap["risk_rate"]}
 	account.FutureSubAccounts[ETC] = FutureSubAccount{ETC, etcMap["account_rights"], etcMap["keep_deposit"], etcMap["profit_real"], etcMap["profit_unreal"], etcMap["risk_rate"]}
+	account.FutureSubAccounts[XRP] = FutureSubAccount{XRP, xrpMap["account_rights"], xrpMap["keep_deposit"], xrpMap["profit_real"], xrpMap["profit_unreal"], xrpMap["risk_rate"]}
+	account.FutureSubAccounts[EOS] = FutureSubAccount{EOS, eosMap["account_rights"], eosMap["keep_deposit"], eosMap["profit_real"], eosMap["profit_unreal"], eosMap["risk_rate"]}
+	account.FutureSubAccounts[BTG] = FutureSubAccount{BTG, btgMap["account_rights"], btgMap["keep_deposit"], btgMap["profit_real"], btgMap["profit_unreal"], btgMap["risk_rate"]}
 
 	return account, nil
 }
@@ -479,6 +517,34 @@ func (ok *OKEx) GetUnfinishFutureOrders(currencyPair CurrencyPair, contractType 
 	return ok.parseOrders(body, currencyPair)
 }
 
+func (ok *OKEx) GetFutureOrder(orderId string, currencyPair CurrencyPair, contractType string) (*FutureOrder, error) {
+	postData := url.Values{}
+	postData.Set("order_id", orderId)
+	postData.Set("contract_type", contractType)
+	postData.Set("symbol", strings.ToLower(currencyPair.ToSymbol("_")))
+	//postData.Set("status", "1")
+	postData.Set("current_page", "1")
+	postData.Set("page_length", "2")
+
+	ok.buildPostForm(&postData)
+
+	body, err := HttpPostForm(ok.client, FUTURE_API_BASE_URL+FUTURE_ORDER_INFO_URI, postData)
+	if err != nil {
+		return nil, err
+	}
+
+	//println(string(body))
+	orders, err := ok.parseOrders(body, currencyPair)
+	if err != nil {
+		return nil, err
+	}
+	if len(orders) == 0 {
+		return nil, errors.New("找不到订单")
+	}
+
+	return &orders[0], nil
+}
+
 func (ok *OKEx) GetFee() (float64, error) {
 	return 0.03, nil //期货固定0.03%手续费
 }
@@ -518,10 +584,10 @@ func (ok *OKEx) GetDeliveryTime() (int, int, int, int) {
 	return 4, 16, 0, 0 //星期五，下午4点交割
 }
 
-func (ok *OKEx) GetKlineRecords(contract_type string, currencyPair CurrencyPair, period string, size, since int) ([]FutureKline, error) {
+func (ok *OKEx) GetKlineRecords(contract_type string, currencyPair CurrencyPair, period, size, since int) ([]FutureKline, error) {
 	params := url.Values{}
 	params.Set("symbol", strings.ToLower(currencyPair.ToSymbol("_")))
-	params.Set("type", period)
+	params.Set("type", _INERNAL_KLINE_PERIOD_CONVERTER[period])
 	params.Set("contract_type", contract_type)
 	params.Set("size", fmt.Sprintf("%d", size))
 	params.Set("since", fmt.Sprintf("%d", since))
@@ -574,8 +640,45 @@ func (ok *OKEx) GetKlineRecords(contract_type string, currencyPair CurrencyPair,
 	return klineRecords, nil
 }
 
-func (okFuture *OKEx) GetTrades(currencyPair CurrencyPair, since int64) ([]Trade, error) {
-	panic("unimplements")
+func (okFuture *OKEx) GetTrades(contract_type string, currencyPair CurrencyPair, since int64) ([]Trade, error) {
+	params := url.Values{}
+	params.Set("symbol", strings.ToLower(currencyPair.ToSymbol("_")))
+	params.Set("contract_type", contract_type)
+	//log.Println(params.Encode())
+
+	url := FUTURE_API_BASE_URL + TRADES_URI + "?" + params.Encode()
+	body, err := HttpGet5(okFuture.client, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Println(string(body))
+
+	var trades []Trade
+	var resp []interface{}
+	err = json.Unmarshal(body, &resp)
+	if err != nil {
+		return nil, errors.New(string(body))
+	}
+
+	for _, v := range resp {
+		item := v.(map[string]interface{})
+
+		tid := int64(item["tid"].(float64))
+		direction := item["type"].(string)
+		amount := item["amount"].(float64)
+		price := item["price"].(float64)
+		time := int64(item["date_ms"].(float64))
+
+		var TradeSide TradeSide
+		if direction == "buy" {
+			TradeSide = BUY
+		} else {
+			TradeSide = SELL
+		}
+		trades = append(trades, Trade{tid, TradeSide, amount, price, time, currencyPair})
+	}
+
+	return trades, nil
 }
 
 func (okFuture *OKEx) errorWrapper(errorCode int) ApiError {
