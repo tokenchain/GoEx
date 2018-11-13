@@ -2,6 +2,34 @@ package goex
 
 import "strings"
 
+// ETH_BTC --> ethbtc
+type Symbols map[CurrencyPair]string
+
+// huobi.com --> symbols
+type ExSymbols map[string]Symbols
+
+var exSymbols ExSymbols
+
+func GetExSymbols(exName string) Symbols {
+	ret, ok := exSymbols[exName]
+	if !ok {
+		return nil
+	}
+	return ret
+}
+
+func RegisterExSymbol(exName string, pair CurrencyPair) {
+	if exSymbols == nil {
+		exSymbols = make(ExSymbols)
+	}
+
+	if _, ok := exSymbols[exName]; !ok {
+		exSymbols[exName] = make(Symbols)
+	}
+
+	exSymbols[exName][pair] = pair.ToSymbol("")
+}
+
 type Currency struct {
 	Symbol string
 	Desc   string
@@ -23,10 +51,13 @@ var (
 	USD     = Currency{"USD", "USA dollar"}
 	USDT    = Currency{"USDT","http://tether.io"}
 	EUR     = Currency{"EUR", ""}
+	KRW     = Currency{"KRW", ""}
+	JPY     = Currency{"JPY", "japanese yen"}
 	BTC     = Currency{"BTC", "bitcoin.org"}
 	XBT     = Currency{"XBT", "bitcoin.org"}
 	BCC     = Currency{"BCC", "bitcoin-abc"}
 	BCH     = Currency{"BCH","bitcoin-abc"}
+	BCX     = Currency{"BCX",""}
 	LTC     = Currency{"LTC", "litecoin.org"}
 	ETH     = Currency{"ETH", ""}
 	ETC     = Currency{"ETC", ""}
@@ -38,6 +69,10 @@ var (
 	ZEC     = Currency{"ZEC", ""}
 	DCR     = Currency{"DCR", ""}
 	XRP     = Currency{"XRP", ""}
+	BTG     = Currency{"BTG",""}
+	BCD     = Currency{"BCD",""}
+	NEO     = Currency{"NEO","neo.org"}
+	HSR     = Currency{"HSR",""}
 
 	//currency pair
 
@@ -53,6 +88,12 @@ var (
 	ANS_CNY  = CurrencyPair{ANS, CNY}
 	ZEC_CNY  = CurrencyPair{ZEC, CNY}
 
+	BTC_KRW  = CurrencyPair{BTC,KRW}
+	ETH_KRW  = CurrencyPair{ETH,KRW}
+	ETC_KRW  = CurrencyPair{ETC,KRW}
+	LTC_KRW  = CurrencyPair{LTC,KRW}
+	BCH_KRW  = CurrencyPair{BCH,KRW}
+
 	BTC_USD = CurrencyPair{BTC, USD}
 	LTC_USD = CurrencyPair{LTC, USD}
 	ETH_USD = CurrencyPair{ETH, USD}
@@ -60,8 +101,27 @@ var (
 	BCH_USD = CurrencyPair{BCH, USD}
 	BCC_USD = CurrencyPair{BCC, USD}
 	XRP_USD = CurrencyPair{XRP, USD}
+	BCD_USD = CurrencyPair{BCD,USD}
+
+	BTC_USDT = CurrencyPair{BTC,USDT}
+	LTC_USDT = CurrencyPair{LTC, USDT}
+	BCH_USDT = CurrencyPair{BCH, USDT}
+	BCC_USDT = CurrencyPair{BCC,USDT}
+	ETC_USDT = CurrencyPair{ETC,USDT}
+	ETH_USDT = CurrencyPair{ETH,USDT}
+	BCD_USDT = CurrencyPair{BCD,USDT}
+	NEO_USDT = CurrencyPair{NEO,USDT}
+	EOS_USDT = CurrencyPair{EOS,USDT}
+	XRP_USDT = CurrencyPair{XRP,USDT}
+	HSR_USDT = CurrencyPair{HSR,USDT}
 
 	XRP_EUR = CurrencyPair{XRP , EUR}
+
+	BTC_JPY = CurrencyPair{BTC,JPY}
+	LTC_JPY = CurrencyPair{LTC,JPY}
+	ETH_JPY = CurrencyPair{ETH,JPY}
+	ETC_JPY = CurrencyPair{ETC,JPY}
+	BCH_JPY = CurrencyPair{BCH,JPY}
 
 	LTC_BTC = CurrencyPair{LTC, BTC}
 	ETH_BTC = CurrencyPair{ETH, BTC}
@@ -70,9 +130,17 @@ var (
 	BCH_BTC = CurrencyPair{BCH, BTC}
 	DCR_BTC = CurrencyPair{DCR, BTC}
 	XRP_BTC = CurrencyPair{XRP ,BTC}
+	BTG_BTC = CurrencyPair{BTG,BTC}
+	BCD_BTC = CurrencyPair{BCD,BTC}
+	NEO_BTC = CurrencyPair{NEO,BTC}
+	EOS_BTC = CurrencyPair{EOS,BTC}
+	HSR_BTC = CurrencyPair{HSR,BTC}
 
 	ETC_ETH = CurrencyPair{ETC, ETH}
 	EOS_ETH = CurrencyPair{EOS, ETH}
+	ZEC_ETH = CurrencyPair{ZEC,ETH}
+	NEO_ETH = CurrencyPair{NEO,ETH}
+	HSR_ETH = CurrencyPair{HSR,ETH}
 
 	UNKNOWN_PAIR = CurrencyPair{UNKNOWN,UNKNOWN}
 )
@@ -82,7 +150,38 @@ func (c CurrencyPair) String() string {
 }
 
 func NewCurrency(symbol, desc string) Currency {
-	return Currency{symbol, desc}
+	switch symbol {
+	case "cny" , "CNY":
+		return CNY
+	case "usdt", "USDT":
+		return USDT
+	case "usd", "USD":
+		return USD
+	case "jpy" , "JPY":
+		return JPY
+	case "krw", "KRW":
+		return KRW
+	case "eur", "EUR":
+		return EUR
+	case "btc", "BTC":
+		return BTC
+	case "xbt", "XBT":
+		return XBT
+	case "bch", "BCH":
+		return BCH
+	case "bcc", "BCC":
+		return BCC
+	case "ltc", "LTC":
+		return LTC
+	case "sc", "SC":
+		return SC
+	case "ans", "ANS":
+		return ANS
+	case "neo", "NEO":
+		return NEO
+	default:
+		return Currency{strings.ToUpper(symbol) , desc}
+	}
 }
 
 func NewCurrencyPair(currencyA Currency, currencyB Currency) CurrencyPair {
@@ -93,7 +192,7 @@ func NewCurrencyPair2(currencyPairSymbol string) CurrencyPair  {
 	currencys := strings.Split(currencyPairSymbol , "_")
 	if len(currencys) == 2 {
 		return CurrencyPair{NewCurrency(currencys[0] , "") ,
-			NewCurrency(currencys[1] , "")}
+		NewCurrency(currencys[1] , "")}
 	}
 	return UNKNOWN_PAIR
 }
