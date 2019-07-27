@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 )
 
 const (
@@ -34,12 +33,7 @@ const (
 type OKEx struct {
 	apiKey,
 	apiSecretKey string
-	client            *http.Client
-	ws                *WsConn
-	createWsLock      sync.Mutex
-	wsTickerHandleMap map[string]func(*Ticker)
-	wsDepthHandleMap  map[string]func(*Depth)
-	wsTradeHandleMap  map[string]func(*Trade)
+	client *http.Client
 }
 
 func NewOKEx(client *http.Client, api_key, secret_key string) *OKEx {
@@ -130,6 +124,7 @@ func (ok *OKEx) GetFutureTicker(currencyPair CurrencyPair, contractType string) 
 	tickerMap := bodyMap["ticker"].(map[string]interface{})
 
 	ticker := new(Ticker)
+	ticker.Pair = currencyPair
 	ticker.Date, _ = strconv.ParseUint(bodyMap["date"].(string), 10, 64)
 	ticker.Buy = tickerMap["buy"].(float64)
 	ticker.Sell = tickerMap["sell"].(float64)
@@ -173,6 +168,9 @@ func (ok *OKEx) GetFutureDepth(currencyPair CurrencyPair, contractType string, s
 	}
 
 	depth := new(Depth)
+	depth.Pair = currencyPair
+	depth.ContractType = contractType
+
 	size2 := len(bodyMap["asks"].([]interface{}))
 	skipSize := 0
 	if size < size2 {
@@ -254,6 +252,7 @@ type futureUserInfoResponse struct {
 		Xrp map[string]float64 `json:"xrp"`
 		Eos map[string]float64 `json:"eos"`
 		Btg map[string]float64 `json:"btg"`
+		Bsv map[string]float64 `json:"bsv"`
 	} `json:info`
 	Result     bool `json:"result,bool"`
 	Error_code int  `json:"error_code"`
@@ -293,6 +292,7 @@ func (ok *OKEx) GetFutureUserinfo() (*FutureAccount, error) {
 	xrpMap := resp.Info.Xrp
 	eosMap := resp.Info.Eos
 	btgMap := resp.Info.Btg
+	bsvMap := resp.Info.Bsv
 
 	account.FutureSubAccounts[BTC] = FutureSubAccount{BTC, btcMap["account_rights"], btcMap["keep_deposit"], btcMap["profit_real"], btcMap["profit_unreal"], btcMap["risk_rate"]}
 	account.FutureSubAccounts[LTC] = FutureSubAccount{LTC, ltcMap["account_rights"], ltcMap["keep_deposit"], ltcMap["profit_real"], ltcMap["profit_unreal"], ltcMap["risk_rate"]}
@@ -302,6 +302,7 @@ func (ok *OKEx) GetFutureUserinfo() (*FutureAccount, error) {
 	account.FutureSubAccounts[XRP] = FutureSubAccount{XRP, xrpMap["account_rights"], xrpMap["keep_deposit"], xrpMap["profit_real"], xrpMap["profit_unreal"], xrpMap["risk_rate"]}
 	account.FutureSubAccounts[EOS] = FutureSubAccount{EOS, eosMap["account_rights"], eosMap["keep_deposit"], eosMap["profit_real"], eosMap["profit_unreal"], eosMap["risk_rate"]}
 	account.FutureSubAccounts[BTG] = FutureSubAccount{BTG, btgMap["account_rights"], btgMap["keep_deposit"], btgMap["profit_real"], btgMap["profit_unreal"], btgMap["risk_rate"]}
+	account.FutureSubAccounts[BSV] = FutureSubAccount{BSV, bsvMap["account_rights"], bsvMap["keep_deposit"], bsvMap["profit_real"], bsvMap["profit_unreal"], bsvMap["risk_rate"]}
 
 	return account, nil
 }
@@ -451,6 +452,7 @@ func (ok *OKEx) parseOrders(body []byte, currencyPair CurrencyPair) ([]FutureOrd
 		vv := v.(map[string]interface{})
 		futureOrder := FutureOrder{}
 		futureOrder.OrderID = int64(vv["order_id"].(float64))
+		futureOrder.OrderID2 = fmt.Sprint(int64(vv["order_id"].(float64)))
 		futureOrder.Amount = vv["amount"].(float64)
 		futureOrder.Price = vv["price"].(float64)
 		futureOrder.AvgPrice = vv["price_avg"].(float64)
@@ -575,6 +577,8 @@ func (ok *OKEx) GetContractValue(currencyPair CurrencyPair) (float64, error) {
 		return 100, nil
 	case LTC_USD, ETH_USD, ETC_USD, BCH_USD:
 		return 10, nil
+	default:
+		return 10, nil
 	}
 
 	return -1, errors.New("error")
@@ -669,13 +673,7 @@ func (okFuture *OKEx) GetTrades(contract_type string, currencyPair CurrencyPair,
 		price := item["price"].(float64)
 		time := int64(item["date_ms"].(float64))
 
-		var TradeSide TradeSide
-		if direction == "buy" {
-			TradeSide = BUY
-		} else {
-			TradeSide = SELL
-		}
-		trades = append(trades, Trade{tid, TradeSide, amount, price, time, currencyPair})
+		trades = append(trades, Trade{tid, AdaptTradeSide(direction), amount, price, time, currencyPair})
 	}
 
 	return trades, nil
