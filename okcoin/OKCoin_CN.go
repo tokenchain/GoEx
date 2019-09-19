@@ -4,19 +4,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	. "github.com/nntaoli-project/GoEx"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
-	. "github.com/nntaoli-project/GoEx"
 )
 
 const (
-	url_ticker       = "ticker.do"
-	url_depth        = "depth.do"
-	url_trades       = "trades.do"
-	url_kline        = "kline.do?symbol=%s&type=%s&size=%d&since=%d"
+	url_ticker = "ticker.do"
+	url_depth  = "depth.do"
+	url_trades = "trades.do"
+	url_kline  = "kline.do?symbol=%s&type=%s&size=%d"
 
 	url_userinfo      = "userinfo.do"
 	url_trade         = "trade.do"
@@ -60,8 +59,8 @@ var _INERNAL_KLINE_PERIOD_CONVERTER = map[int]string{
 //	}
 //}
 
-func New(client *http.Client, api_key, secret_key string) *OKCoinCN_API {
-	return &OKCoinCN_API{client, api_key, secret_key, "https://www.okcoin.cn/api/v1/"}
+func NewOKCoinCn(client *http.Client, api_key, secret_key string) *OKCoinCN_API {
+	return &OKCoinCN_API{client, api_key, secret_key, "https://www.okex.com/api/v1/"}
 }
 
 func (ctx *OKCoinCN_API) buildPostForm(postForm *url.Values) error {
@@ -112,7 +111,7 @@ func (ctx *OKCoinCN_API) placeOrder(side, amount, price string, currency Currenc
 		return nil, err
 	}
 
-	if err , isok := respMap["error_code"].(float64) ; isok {
+	if err, isok := respMap["error_code"].(float64); isok {
 		return nil, errors.New(fmt.Sprint(err))
 	}
 
@@ -170,7 +169,7 @@ func (ctx *OKCoinCN_API) CancelOrder(orderId string, currency CurrencyPair) (boo
 		return false, err
 	}
 
-	if err , isok := respMap["error_code"].(float64) ; isok {
+	if err, isok := respMap["error_code"].(float64); isok {
 		return false, errors.New(fmt.Sprint(err))
 	}
 
@@ -185,7 +184,6 @@ func (ctx *OKCoinCN_API) getOrders(orderId string, currency CurrencyPair) ([]Ord
 	ctx.buildPostForm(&postData)
 
 	body, err := HttpPostForm(ctx.client, ctx.api_base_url+url_order_info, postData)
-	//println(string(body))
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +195,7 @@ func (ctx *OKCoinCN_API) getOrders(orderId string, currency CurrencyPair) ([]Ord
 		return nil, err
 	}
 
-	if err , isok := respMap["error_code"].(float64) ; isok {
+	if err, isok := respMap["error_code"].(float64); isok {
 		return nil, errors.New(fmt.Sprint(err))
 	}
 
@@ -285,7 +283,7 @@ func (ctx *OKCoinCN_API) GetAccount() (*Account, error) {
 		return nil, err
 	}
 
-	if err , isok := respMap["error_code"].(float64) ; isok {
+	if err, isok := respMap["error_code"].(float64); isok {
 		return nil, errors.New(fmt.Sprint(err))
 	}
 
@@ -362,7 +360,15 @@ func (ctx *OKCoinCN_API) GetTicker(currency CurrencyPair) (*Ticker, error) {
 		return nil, err
 	}
 
-	tickerMap = bodyDataMap["ticker"].(map[string]interface{})
+	if errCode, is := bodyDataMap["error_code"].(int); is {
+		return nil, errors.New(fmt.Sprint(errCode))
+	}
+
+	tickerMap, isok := bodyDataMap["ticker"].(map[string]interface{})
+	if !isok {
+		return nil, errors.New(fmt.Sprintf("%+v", bodyDataMap))
+	}
+
 	ticker.Date, _ = strconv.ParseUint(bodyDataMap["date"].(string), 10, 64)
 	ticker.Last, _ = strconv.ParseFloat(tickerMap["last"].(string), 64)
 	ticker.Buy, _ = strconv.ParseFloat(tickerMap["buy"].(string), 64)
@@ -370,12 +376,13 @@ func (ctx *OKCoinCN_API) GetTicker(currency CurrencyPair) (*Ticker, error) {
 	ticker.Low, _ = strconv.ParseFloat(tickerMap["low"].(string), 64)
 	ticker.High, _ = strconv.ParseFloat(tickerMap["high"].(string), 64)
 	ticker.Vol, _ = strconv.ParseFloat(tickerMap["vol"].(string), 64)
-
+	ticker.Pair = currency
 	return &ticker, nil
 }
 
 func (ctx *OKCoinCN_API) GetDepth(size int, currency CurrencyPair) (*Depth, error) {
 	var depth Depth
+	depth.Pair = currency
 
 	url := ctx.api_base_url + url_depth + "?symbol=" + strings.ToLower(currency.ToSymbol("_")) + "&size=" + strconv.Itoa(size)
 	//fmt.Println(url)
@@ -384,13 +391,13 @@ func (ctx *OKCoinCN_API) GetDepth(size int, currency CurrencyPair) (*Depth, erro
 		return nil, err
 	}
 
-	if err , isok := bodyDataMap["error_code"].(float64) ; isok {
+	if err, isok := bodyDataMap["error_code"].(float64); isok {
 		return nil, errors.New(fmt.Sprint(err))
 	}
 
-	dep , isok := bodyDataMap["asks"].([]interface{})
+	dep, isok := bodyDataMap["asks"].([]interface{})
 	if !isok {
-		return nil , errors.New("parse data error")
+		return nil, errors.New("parse data error")
 	}
 
 	for _, v := range dep {
@@ -430,16 +437,15 @@ func (ctx *OKCoinCN_API) GetKlineRecords(currency CurrencyPair, period, size, si
 
 	klineUrl := ctx.api_base_url + fmt.Sprintf(url_kline,
 		strings.ToLower(currency.ToSymbol("_")),
-		_INERNAL_KLINE_PERIOD_CONVERTER[period], size, since)
+		_INERNAL_KLINE_PERIOD_CONVERTER[period], size)
+	if since != -1 {
+		klineUrl += "&since=" + strconv.Itoa(since)
+	}
 
-	resp, err := http.Get(klineUrl)
+	body, err := HttpGet5(ctx.client, klineUrl, nil)
 	if err != nil {
 		return nil, err
 	}
-
-	defer resp.Body.Close()
-
-	body, err := ioutil.ReadAll(resp.Body)
 
 	var klines [][]interface{}
 
@@ -447,25 +453,25 @@ func (ctx *OKCoinCN_API) GetKlineRecords(currency CurrencyPair, period, size, si
 	if err != nil {
 		return nil, err
 	}
-
 	var klineRecords []Kline
 
 	for _, record := range klines {
 		r := Kline{}
+		r.Pair = currency
 		for i, e := range record {
 			switch i {
 			case 0:
 				r.Timestamp = int64(e.(float64)) / 1000 //to unix timestramp
 			case 1:
-				r.Open = e.(float64)
+				r.Open = ToFloat64(e)
 			case 2:
-				r.High = e.(float64)
+				r.High = ToFloat64(e)
 			case 3:
-				r.Low = e.(float64)
+				r.Low = ToFloat64(e)
 			case 4:
-				r.Close = e.(float64)
+				r.Close = ToFloat64(e)
 			case 5:
-				r.Vol = e.(float64)
+				r.Vol = ToFloat64(e)
 			}
 		}
 		klineRecords = append(klineRecords, r)
@@ -500,7 +506,7 @@ func (ctx *OKCoinCN_API) GetOrderHistorys(currency CurrencyPair, currentPage, pa
 		return nil, err
 	}
 
-	if err , isok := respMap["error_code"].(float64) ; isok {
+	if err, isok := respMap["error_code"].(float64); isok {
 		return nil, errors.New(fmt.Sprint(err))
 	}
 
@@ -519,6 +525,7 @@ func (ctx *OKCoinCN_API) GetOrderHistorys(currency CurrencyPair, currentPage, pa
 		order.DealAmount = orderMap["deal_amount"].(float64)
 		order.AvgPrice = orderMap["avg_price"].(float64)
 		order.OrderTime = int(orderMap["create_date"].(float64))
+		order.Side = AdaptTradeSide(orderMap["type"].(string))
 
 		//status:-1:已撤销  0:未成交  1:部分成交  2:完全成交 4:撤单处理中
 		switch int(orderMap["status"].(float64)) {
@@ -534,13 +541,6 @@ func (ctx *OKCoinCN_API) GetOrderHistorys(currency CurrencyPair, currentPage, pa
 			order.Status = ORDER_CANCEL_ING
 		}
 
-		switch orderMap["type"].(string) {
-		case "buy":
-			order.Side = BUY
-		case "sell":
-			order.Side = SELL
-		}
-
 		orderAr = append(orderAr, order)
 	}
 
@@ -548,26 +548,33 @@ func (ctx *OKCoinCN_API) GetOrderHistorys(currency CurrencyPair, currentPage, pa
 }
 
 func (ok *OKCoinCN_API) GetTrades(currencyPair CurrencyPair, since int64) ([]Trade, error) {
-	tradeUrl := ok.api_base_url + trade_uri
-	postData := url.Values{}
-	postData.Set("symbol", strings.ToLower(currencyPair.ToSymbol("_")))
-	postData.Set("since", fmt.Sprintf("%d", since))
+	url := ok.api_base_url + url_trades + "?symbol=" + strings.ToLower(currencyPair.ToSymbol("_")) + "&since="
+	if since > 0 {
+		url = url + fmt.Sprintf("%d", since)
+	}
 
-	err := ok.buildPostForm(&postData)
+	body, err := HttpGet5(ok.client, url, nil)
 	if err != nil {
 		return nil, err
 	}
-
-	body, err := HttpPostForm(ok.client, tradeUrl, postData)
-	if err != nil {
-		return nil, err
-	}
-	//println(string(body))
+	fmt.Println(string(body))
 
 	var trades []Trade
-	err = json.Unmarshal(body, &trades)
+	var resp []interface{}
+	err = json.Unmarshal(body, &resp)
 	if err != nil {
-		return nil, err
+		return nil, errors.New(string(body))
+	}
+
+	for _, v := range resp {
+		item := v.(map[string]interface{})
+
+		tid := int64(item["tid"].(float64))
+		direction := item["type"].(string)
+		amount := item["amount"].(float64)
+		price := item["price"].(float64)
+		time := int64(item["date_ms"].(float64))
+		trades = append(trades, Trade{tid, AdaptTradeSide(direction), amount, price, time, currencyPair})
 	}
 
 	return trades, nil

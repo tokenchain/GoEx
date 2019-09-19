@@ -113,7 +113,7 @@ func (k *Kraken) toOrder(orderinfo interface{}) Order {
 		Price:      ToFloat64(descmap["price"]),
 		DealAmount: ToFloat64(omap["vol_exec"]),
 		AvgPrice:   ToFloat64(omap["price"]),
-		Side:       k.convertSide(descmap["type"].(string)),
+		Side:       AdaptTradeSide(descmap["type"].(string)),
 		Status:     k.convertOrderStatus(omap["status"].(string)),
 		Fee:        ToFloat64(omap["fee"]),
 		OrderTime:  ToInt(omap["opentm"]),
@@ -225,6 +225,7 @@ func (k *Kraken) GetTicker(currency CurrencyPair) (*Ticker, error) {
 	}
 
 	ticker := new(Ticker)
+	ticker.Pair = currency
 	for _, t := range resultmap {
 		tickermap := t.(map[string]interface{})
 		ticker.Last = ToFloat64(tickermap["c"].([]interface{})[0])
@@ -248,6 +249,7 @@ func (k *Kraken) GetDepth(size int, currency CurrencyPair) (*Depth, error) {
 
 	//log.Println(respmap)
 	dep := Depth{}
+	dep.Pair = currency
 	for _, d := range resultmap {
 		depmap := d.(map[string]interface{})
 		asksmap := depmap["asks"].([]interface{})
@@ -354,16 +356,6 @@ func (k *Kraken) convertPair(pair CurrencyPair) CurrencyPair {
 	}
 
 	return pair
-}
-
-func (k *Kraken) convertSide(typeS string) TradeSide {
-	switch typeS {
-	case "sell":
-		return SELL
-	case "buy":
-		return BUY
-	}
-	return SELL
 }
 
 func (k *Kraken) convertOrderStatus(status string) TradeStatus {

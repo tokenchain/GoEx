@@ -39,6 +39,7 @@ type FutureRestAPI interface {
 	GetFutureUserinfo() (*FutureAccount, error)
 
 	/**
+	 * @deprecated
 	 * 期货下单
 	 * @param currencyPair   btc_usd:比特币    ltc_usd :莱特币
 	 * @param contractType   合约类型: this_week:当周   next_week:下周   month:当月   quarter:季度
@@ -72,6 +73,11 @@ type FutureRestAPI interface {
 	GetFutureOrders(orderIds []string, currencyPair CurrencyPair, contractType string) ([]FutureOrder, error)
 
 	/**
+	 *获取单个订单信息
+	 */
+	GetFutureOrder(orderId string, currencyPair CurrencyPair, contractType string) (*FutureOrder, error)
+
+	/**
 	 *获取未完成订单信息
 	 */
 	GetUnfinishFutureOrders(currencyPair CurrencyPair, contractType string) ([]FutureOrder, error)
@@ -84,7 +90,7 @@ type FutureRestAPI interface {
 	/**
 	 *获取交易所的美元人民币汇率
 	 */
-	GetExchangeRate() (float64, error)
+	//GetExchangeRate() (float64, error)
 
 	/**
 	 *获取每张合约价值
@@ -99,5 +105,10 @@ type FutureRestAPI interface {
 	/**
 	 * 获取K线数据
 	 */
-	GetKlineRecords(contract_type string, currency CurrencyPair, period string, size, since int) ([]FutureKline, error)
+	GetKlineRecords(contract_type string, currency CurrencyPair, period, size, since int) ([]FutureKline, error)
+
+	/**
+	 * 获取Trade数据
+	 */
+	GetTrades(contract_type string, currencyPair CurrencyPair, since int64) ([]Trade, error)
 }
